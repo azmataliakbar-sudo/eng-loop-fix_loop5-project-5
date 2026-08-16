@@ -1,14 +1,8 @@
 $root = "C:\Projects\eng_loop\fix_loop5"
-$worktreeBase = Join-Path $root "worktrees"
 $doneFile = Join-Path $root "task-done.txt"
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
 $startedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-# Remove any leftover worktrees from a previous run, so this run starts fresh.
-if (Test-Path $worktreeBase) {
-    Remove-Item -Recurse -Force $worktreeBase
-}
-New-Item -ItemType Directory -Path $worktreeBase | Out-Null
 
 $candidates = @(
     @{ Name = "candidate-a"; File = "candidates\candidate-a.js" },
@@ -17,28 +11,32 @@ $candidates = @(
 )
 
 $verdicts = @()
+$createdPaths = @()
 
 foreach ($c in $candidates) {
-    $wtPath = Join-Path $worktreeBase $c.Name
-    git worktree add $wtPath HEAD 2>&1 | Out-Null
+    $wtPath = Join-Path $root "wt-$stamp-$($c.Name)"
 
-    $srcDest = Join-Path $wtPath "src\calc.js"
-    Copy-Item -Path (Join-Path $root $c.File) -Destination $srcDest -Force
+    $null = git worktree add $wtPath HEAD 2>&1
+    if (Test-Path (Join-Path $wtPath "src\calc.js")) {
+        Copy-Item -Path (Join-Path $root $c.File) -Destination (Join-Path $wtPath "src\calc.js") -Force
 
-    Push-Location $wtPath
-    try {
-        npm test 2>&1 | Out-Null
-        $exit = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+        Push-Location $wtPath
+        try {
+            npm test 2>&1 | Out-Null
+            $exit = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
 
-    if ($exit -eq 0) {
-        $verdict = "PASS"
-        $prFile = "PR-$($c.Name).md"
-        Set-Content -Path (Join-Path $root $prFile) -Value "# PR: $($c.Name)`n`nVerdict: PASS"
+        if ($exit -eq 0) {
+            $verdict = "PASS"
+            Set-Content -Path (Join-Path $root "PR-$($c.Name).md") -Value "# PR: $($c.Name)`n`nVerdict: PASS"
+        } else {
+            $verdict = "FAIL"
+        }
     } else {
-        $verdict = "FAIL"
+        $verdict = "WORKTREE-ERROR"
+        $exit = -1
     }
 
     $verdicts += [PSCustomObject]@{
@@ -46,17 +44,20 @@ foreach ($c in $candidates) {
         Verdict = $verdict
         ExitCode = $exit
     }
+
+    $createdPaths += $wtPath
 }
 
-# Clean up worktrees.
-git worktree prune 2>&1 | Out-Null
-if (Test-Path $worktreeBase) {
-    Remove-Item -Recurse -Force $worktreeBase
+# Properly remove each worktree, then prune.
+foreach ($p in $createdPaths) {
+    if (Test-Path $p) {
+        git worktree remove --force $p 2>&1 | Out-Null
+    }
 }
+git worktree prune 2>&1 | Out-Null
 
 $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-# Count existing DONE and SUMMARY files for numbering.
 $doneCount = 0
 if (Test-Path $doneFile) {
     $doneCount = (Get-Content $doneFile | Where-Object { $_ -match '^DONE-' }).Count
